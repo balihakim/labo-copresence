@@ -56,7 +56,8 @@ const APP = {
     const params = new URLSearchParams(location.search);
     $("champ-salle").value = (params.get("salle") || CONFIG.SALLE_PAR_DEFAUT || "equipe-1");
     try { $("champ-nom").value = localStorage.getItem("copresence-nom") || ""; } catch (e) { /* stockage indisponible */ }
-    if (!CONFIG.CLE_API || CONFIG.CLE_API.indexOf("COLLEZ") === 0) $("alerte-cle").hidden = false;
+    //if (!CONFIG.CLE_API || CONFIG.CLE_API.indexOf("COLLEZ") === 0) $("alerte-cle").hidden = false;
+     if (!CONFIG.FIREBASE || !CONFIG.FIREBASE.apiKey) $("alerte-cle").hidden = false;
 
     if (navigator.xr && navigator.xr.isSessionSupported) {
       navigator.xr.isSessionSupported("immersive-ar").then(ok => {
