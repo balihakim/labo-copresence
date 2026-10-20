@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <!-- charset utf-8 obligatoire : Multisynq/Croquet calcule une empreinte du code -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Labo Co-présence XR</title>
+  <meta name="description" content="Atelier de co-présence à distance : jumeau numérique partagé en RA (Android) et en 3D (iPhone, ordinateur).">
+  <link rel="stylesheet" href="css/style.css">
+
+  <!-- Bibliothèques (versions figées) -->
+  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@croquet/croquet@2.0.0/pub/croquet.min.js"></script>
+
+  <!-- Le labo -->
+  <script src="config.js"></script>
+  <script src="js/modele.js"></script>
+  <script src="js/mesures.js"></script>
+  <script src="js/vue.js"></script>
+</head>
+<body>
+
+  <!-- ========== SCÈNE 3D / RA ========== -->
+  <a-scene id="scene"
+    renderer="antialias: true; colorManagement: true"
+    xr-mode-ui="enabled: false"
+    vr-mode-ui="enabled: false"
+    device-orientation-permission-ui="enabled: false"
+    loading-screen="dotsColor: #0c8599; backgroundColor: #f1f3f5"
+    webxr="optionalFeatures: hit-test, local-floor, dom-overlay; overlayElement: #ui"
+    ar-hit-test="target: #ancre; enabled: true"
+    cursor="rayOrigin: mouse; fuse: false"
+    raycaster="objects: .cliquable; far: 30"
+    boucle-copresence>
+
+    <a-entity light="type: hemisphere; color: #ffffff; groundColor: #8899aa; intensity: 1.1"></a-entity>
+    <a-entity light="type: directional; color: #ffffff; intensity: 0.9" position="2 4 3"></a-entity>
+
+    <a-sky id="ciel" color="#e7ecf2"></a-sky>
+    <a-plane id="sol" rotation="-90 0 0" width="24" height="24" color="#cfd6de"></a-plane>
+    <a-entity id="grille"></a-entity>
+
+    <a-entity id="rig" position="0 0 0">
+      <a-entity id="cam" camera position="0 1.6 0"
+        look-controls="magicWindowTrackingEnabled: false; pointerLockEnabled: false"
+        wasd-controls="acceleration: 18"></a-entity>
+    </a-entity>
+
+    <!-- L'ANCRE : repère commun de tous les participants (1er flux de la co-présence).
+         Toutes les positions échangées sont exprimées dans ce repère. -->
+    <a-entity id="ancre" position="0 0 -1.6">
+      <a-entity id="moteur"></a-entity>
+      <a-entity id="avatars"></a-entity>
+      <a-entity id="annotations"></a-entity>
+      <a-entity id="outil" class="cliquable"></a-entity>
+    </a-entity>
+  </a-scene>
+
+  <!-- ========== INTERFACE (aussi utilisée en superposition en RA) ========== -->
+  <div id="ui">
+
+    <!-- Accueil -->
+    <div id="accueil" class="modale visible">
+      <div class="carte">
+        <p class="sur-titre">Atelier · Module 08</p>
+        <h1>Labo de co-présence</h1>
+        <p class="intro">Rejoignez vos coéquipiers autour d'un moteur simplifié (jumeau numérique). Android : réalité augmentée. iPhone et ordinateur : 3D partagée.</p>
+
+        <div id="alerte-cle" class="alerte" hidden>
+          <strong>Clé Multisynq manquante.</strong> Ouvrez <code>config.js</code> dans votre dépôt GitHub et collez votre clé à la place de <code>COLLEZ_VOTRE_CLE_ICI</code>.
+        </div>
+
+        <label for="champ-nom">Votre prénom</label>
+        <input id="champ-nom" type="text" maxlength="24" placeholder="ex. Amina" autocomplete="given-name">
+
+        <fieldset>
+          <legend>Votre rôle</legend>
+          <label class="choix"><input type="radio" name="role" value="expert"> <span><strong>Expert</strong> · voit la panne</span></label>
+          <label class="choix"><input type="radio" name="role" value="technicien" checked> <span><strong>Technicien</strong> · répare avec l'outil</span></label>
+          <label class="choix"><input type="radio" name="role" value="observateur"> <span><strong>Observateur</strong> · observe et annote</span></label>
+        </fieldset>
+
+        <label for="champ-salle">Salle (identique pour toute l'équipe)</label>
+        <input id="champ-salle" type="text" maxlength="30" autocapitalize="off" autocomplete="off">
+
+        <button id="btn-entrer" class="principal">Entrer dans l'espace partagé</button>
+        <p id="etat-connexion" class="petit"></p>
+      </div>
+    </div>
+
+    <!-- Barre d'état -->
+    <div id="barre-haut" hidden>
+      <span id="pastille" class="pastille"></span>
+      <span id="texte-etat">Connexion…</span>
+      <span id="badge-role" class="badge"></span>
+    </div>
+
+    <!-- Message flottant -->
+    <div id="toast" hidden></div>
+
+    <!-- Placement en RA -->
+    <div id="panneau-ar" class="panneau-flottant" hidden>
+      <p><strong>Réalité augmentée.</strong> Visez le sol ou une table, puis touchez l'écran pour placer le moteur. Recommencez si besoin.</p>
+      <div class="rangee">
+        <button id="btn-verrouiller" class="principal">Verrouiller ici</button>
+        <button id="btn-quitter-ar">Quitter la RA</button>
+      </div>
+    </div>
+
+    <!-- Déplacement en 3D -->
+    <div id="pad" hidden>
+      <button data-dir="av" aria-label="Avancer">▲</button>
+      <div><button data-dir="ga" aria-label="Gauche">◀</button><button data-dir="dr" aria-label="Droite">▶</button></div>
+      <button data-dir="ar" aria-label="Reculer">▼</button>
+    </div>
+
+    <!-- Feuille d'outils -->
+    <div id="feuille" hidden>
+      <section data-onglet="mission">
+        <h2>Mission</h2>
+        <p id="mission-etat">En attente.</p>
+        <p id="mission-aide" class="petit"></p>
+        <div class="rangee">
+          <button id="btn-mission" class="principal">Démarrer la mission</button>
+          <button id="btn-mission-reinit">Réinitialiser</button>
+        </div>
+        <h3>Chronologie partagée</h3>
+        <ol id="chronologie"></ol>
+      </section>
+
+      <section data-onglet="outil">
+        <h2>L'outil partagé</h2>
+        <p id="outil-etat">L'outil est sur le socle.</p>
+        <div class="rangee">
+          <button id="btn-prendre" class="principal">Prendre l'outil</button>
+          <button id="btn-poser">Reposer</button>
+        </div>
+        <label for="choix-donner">Passer l'outil à</label>
+        <div class="rangee">
+          <select id="choix-donner"></select>
+          <button id="btn-donner">Passer</button>
+        </div>
+        <p class="petit">Astuce : on peut aussi toucher directement l'outil dans la scène pour le prendre.</p>
+      </section>
+
+      <section data-onglet="annoter">
+        <h2>Annoter le moteur</h2>
+        <label class="interrupteur"><input type="checkbox" id="mode-annoter"> <span>Mode annotation : toucher une pièce y pose une étiquette</span></label>
+        <label for="texte-annot">Texte de l'étiquette</label>
+        <input id="texte-annot" type="text" maxlength="40" value="Ici">
+        <div class="puces">
+          <button class="puce" data-texte="Ici">Ici</button>
+          <button class="puce" data-texte="Regarde ça">Regarde ça</button>
+          <button class="puce" data-texte="Panne ?">Panne ?</button>
+          <button class="puce" data-texte="OK">OK</button>
+        </div>
+        <button id="btn-effacer-annot">Effacer mes annotations</button>
+      </section>
+
+      <section data-onglet="vue">
+        <h2>Points de vue</h2>
+        <div class="rangee">
+          <button id="btn-marche">Démarrer le moteur</button>
+          <button id="btn-eclate">Vue éclatée</button>
+        </div>
+        <button id="btn-ar" class="principal" hidden>Entrer en réalité augmentée</button>
+        <p id="note-ar" class="petit"></p>
+        <label for="choix-pdv">Voir depuis le point de vue de</label>
+        <div class="rangee">
+          <select id="choix-pdv"></select>
+          <button id="btn-pdv">Voir</button>
+          <button id="btn-retour">Ma place</button>
+        </div>
+        <h3>Participants</h3>
+        <ul id="liste-participants"></ul>
+      </section>
+
+      <section data-onglet="mesures">
+        <h2>Mesures de co-présence</h2>
+        <dl class="mesures">
+          <div><dt>Latence (aller-retour)</dt><dd id="m-latence">–</dd></div>
+          <div><dt>Distance à l'avatar le plus proche</dt><dd id="m-distance">–</dd></div>
+          <div><dt>Attention conjointe</dt><dd id="m-attention">–</dd></div>
+          <div><dt>Lignes enregistrées</dt><dd id="m-lignes">0</dd></div>
+        </dl>
+        <div class="rangee">
+          <button id="btn-questionnaire" class="principal">Questionnaire</button>
+          <button id="btn-exporter">Exporter le CSV</button>
+        </div>
+        <button id="btn-lien">Copier le lien d'invitation</button>
+      </section>
+    </div>
+
+    <nav id="onglets" hidden>
+      <button data-onglet="mission">Mission</button>
+      <button data-onglet="outil">Outil</button>
+      <button data-onglet="annoter">Annoter</button>
+      <button data-onglet="vue">Vue</button>
+      <button data-onglet="mesures">Mesures</button>
+    </nav>
+
+    <!-- Questionnaire -->
+    <div id="questionnaire" class="modale">
+      <div class="carte large">
+        <h2>Questionnaire de co-présence</h2>
+        <p class="petit">1 = pas du tout d'accord · 7 = tout à fait d'accord. Items inspirés des dimensions de Biocca et al. (2003), non validés en français : usage pédagogique.</p>
+        <form id="form-questionnaire"></form>
+        <label for="q-ouverte">Qu'est-ce qui a le plus renforcé, ou affaibli, votre sentiment d'être ensemble ?</label>
+        <textarea id="q-ouverte" rows="3"></textarea>
+        <div class="rangee">
+          <button id="btn-q-valider" class="principal">Enregistrer mes réponses</button>
+          <button id="btn-q-fermer">Fermer</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
