@@ -213,41 +213,58 @@ const APP = {
     const nom = $("champ-nom").value.trim() || "Anonyme";
     const role = (document.querySelector('input[name="role"]:checked') || {}).value || "observateur";
     const salle = ($("champ-salle").value.trim() || "equipe-1").toLowerCase()
-      .normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9-]/g, "-");
-    if (!CONFIG.CLE_API || CONFIG.CLE_API.indexOf("COLLEZ") === 0) {
-      $("alerte-cle").hidden = false;
-      $("etat-connexion").textContent = "Impossible de se connecter sans clé Multisynq.";
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9-]/g, "-");
+
+    if (!window.firebase || !firebase.database || !firebase.auth) {
+      $("etat-connexion").textContent = "Erreur : les scripts Firebase ne sont pas chargés.";
       return;
     }
-    try { localStorage.setItem("copresence-nom", nom); } catch (e) { /* stockage indisponible */ }
+
+    try {
+      localStorage.setItem("copresence-nom", nom);
+    } catch (e) {}
+
     this.profil = { nom, role };
     this.salle = salle;
     history.replaceState(null, "", "?salle=" + encodeURIComponent(salle));
     $("btn-entrer").disabled = true;
-    $("etat-connexion").textContent = "Connexion à la salle « " + salle + " »…";
+    $("etat-connexion").textContent = "Connexion Firebase à la salle « " + salle + " »…";
+
     try {
-      this.session = await Croquet.Session.join({
-        apiKey: CONFIG.CLE_API,
-        appId: CONFIG.APP_ID,
-        name: "salle-" + salle,
-        // Mot de passe dérivé du nom de salle : simple pour l'atelier,
-        // mais quiconque connaît le nom de salle peut entrer.
-        password: "copresence-" + salle,
-        model: Espace,
-        view: Vue
-      });
+      if (!firebase.apps.length) {
+        firebase.initializeApp(CONFIG.FIREBASE);
+      }
+
+      const authentification = firebase.auth();
+      if (!authentification.currentUser) {
+        await authentification.signInAnonymously();
+      }
+
+      const uid = authentification.currentUser.uid;
+      const id = uid + "-" + Math.random().toString(36).slice(2, 9);
+
+      this.session = null;
+      const adaptateur = new VueFirebase(salle, id);
+      await adaptateur.connecter();
+
+      this.lierVue(adaptateur);
+
       $("accueil").classList.remove("visible");
-      $("barre-haut").hidden = false; $("onglets").hidden = false; $("pad").hidden = false;
-      const badge = $("badge-role");
-      badge.textContent = ROLES[role];
+      $("barre-haut").hidden = false;
+      $("onglets").hidden = false;
+      $("pad").hidden = false;
+      $("badge-role").textContent = ROLES[role];
+
       Mesures.demarrer();
       Mesures.noterEvenement("connexion", "salle=" + salle);
-      this.toast("Bienvenue " + nom + " ! Touchez « Vue » pour la RA et les points de vue.");
+      this.toast("Bienvenue " + nom + " ! Vous êtes connecté à la salle " + salle + ".");
+
     } catch (err) {
-      console.error(err);
+      console.error("Erreur Firebase :", err);
       $("btn-entrer").disabled = false;
-      $("etat-connexion").textContent = "Échec de connexion : " + (err && err.message ? err.message : err) +
-        ". Vérifiez la clé dans config.js et l'adresse autorisée sur multisynq.io.";
+      $("etat-connexion").textContent =
+        "Échec de connexion Firebase : " + (err.message || err) +
+        ". Vérifiez les règles de la base et l'authentification anonyme.";
     }
   },
 
@@ -381,9 +398,9 @@ const APP = {
     dt = Math.min(dt || 16, 100);
     // En session immersive, certains navigateurs suspendent requestAnimationFrame :
     // on fait alors avancer Multisynq manuellement.
-    if (this.session && this.scene.renderer && this.scene.renderer.xr.isPresenting && typeof this.session.step === "function") {
-      try { this.session.step(performance.now()); } catch (e) { /* ignorer */ }
-    }
+    //if (this.session && this.scene.renderer && this.scene.renderer.xr.isPresenting && typeof this.session.step === "function") {
+    //  try { this.session.step(performance.now()); } catch (e) { /* ignorer */ }
+    //}
     this.deplacer(dt);
     const m = this.modele();
     if (!m) return;
@@ -656,17 +673,197 @@ AFRAME.registerComponent("face-camera", {
   }
 });
 
-/* ---------- la vue Croquet : simple pont vers APP ---------- */
-class Vue extends Croquet.View {
-  constructor(model) {
-    super(model);
-    this.model = model;
-    this.subscribe(this.viewId, "pong", this.pong);
-    APP.lierVue(this);
+
+/* ---------- Adaptateur Firebase : remplace Croquet ---------- */
+
+class VueFirebase {
+  constructor(salle, id) {
+    this.viewId = id;
+    this.sessionId = salle;
+    this.model = new Espace();
+    this.db = firebase.database();
+    this.roomRef = this.db.ref("salles/" + salle);
+    this.etatRef = this.roomRef.child("etat");
+    this.presenceRef = this.roomRef.child("presence/" + id);
+    this.connecte = false;
+    this.ecouteur = null;
   }
-  pong(t) { Mesures.recevoirPong(t); }
-  detach() { APP.delierVue(this); super.detach(); }
+
+  async connecter() {
+    // Créer l'état initial si cette salle est encore vide.
+    await this.etatRef.transaction(etat => {
+      if (etat) return;
+      return this.model.exporter();
+    });
+
+    // Enregistrer la présence et retirer ce marqueur à la déconnexion.
+    await this.presenceRef.set(true);
+    await this.presenceRef.onDisconnect().remove();
+
+    this.ecouteur = snapshot => {
+      const etat = snapshot.val();
+      if (!etat) return;
+      this.model.appliquer(etat);
+
+      // Mettre à jour la scène quand l'état partagé change.
+      if (APP.vue === this) {
+        APP.rafraichir(this.model);
+      }
+    };
+
+    this.etatRef.on("value", this.ecouteur);
+    this.connecte = true;
+
+    // Créer le participant et diffuser son profil.
+    await this.publish(this.sessionId, "profil", {
+      id: this.viewId,
+      nom: APP.profil.nom,
+      role: APP.profil.role,
+      mode: APP.mode
+    });
+  }
+
+  async publish(_sessionId, evenement, donnees) {
+    if (!this.connecte && evenement !== "profil") return;
+
+    const d = Object.assign({ id: this.viewId }, donnees || {});
+
+    if (evenement === "ping") {
+      if (typeof d.t === "number") Mesures.recevoirPong(d.t);
+      return;
+    }
+
+    await this.etatRef.transaction(etat => {
+      if (!etat) etat = new Espace().exporter();
+
+      etat.participants = etat.participants || {};
+      etat.annotations = etat.annotations || [];
+      etat.selections = etat.selections || {};
+      etat.outil = etat.outil || { proprio: null };
+      etat.moteur = etat.moteur || { marche: false, eclate: false };
+      etat.chronologie = etat.chronologie || [];
+      etat.mission = etat.mission || {
+        etat: "attente", panne: null, debut: 0,
+        duree: null, reparePar: null, numero: 0, erreurs: 0
+      };
+
+      const participants = etat.participants;
+      const moi = participants[d.id];
+
+      if (evenement === "profil") {
+        if (!participants[d.id]) {
+          const couleurs = [
+            "#e8590c", "#1c7ed6", "#2f9e44", "#ae3ec9",
+            "#f08c00", "#0c8599", "#e03131", "#5f3dc4"
+          ];
+          const nombre = Object.keys(participants).length;
+          participants[d.id] = {
+            nom: d.nom || "Anonyme",
+            role: d.role || "observateur",
+            couleur: couleurs[nombre % couleurs.length],
+            p: [0, 1.6, 2],
+            q: [0, 0, 0, 1],
+            regard: null,
+            mode: d.mode || "3d",
+            pret: true
+          };
+        } else {
+          participants[d.id].nom = d.nom || participants[d.id].nom;
+          participants[d.id].role = d.role || participants[d.id].role;
+          participants[d.id].mode = d.mode || "3d";
+          participants[d.id].pret = true;
+        }
+        etat.chronologie.push({ t: Date.now(), texte: (d.nom || "Participant") + " a rejoint la salle." });
+      } else if (evenement === "pose" && moi) {
+        moi.p = d.p || moi.p;
+        moi.q = d.q || moi.q;
+        moi.regard = d.regard === undefined ? moi.regard : d.regard;
+        moi.mode = d.mode || moi.mode;
+      } else if (evenement === "selection" && moi) {
+        if (d.piece) etat.selections[d.id] = d.piece;
+        else delete etat.selections[d.id];
+      } else if (evenement === "annoter" && moi) {
+        etat.annotations.push({
+          id: Date.now() + Math.random(),
+          p: d.p || [0, 0, 0],
+          texte: d.texte || "Annotation",
+          couleur: moi.couleur,
+          auteur: moi.nom
+        });
+        if (etat.annotations.length > 100) etat.annotations.shift();
+      } else if (evenement === "effacer-annotations" && moi) {
+        etat.annotations = [];
+      } else if (evenement === "outil-prendre" && moi) {
+        if (!etat.outil.proprio || etat.outil.proprio === d.id) {
+          etat.outil.proprio = d.id;
+          etat.chronologie.push({ t: Date.now(), texte: moi.nom + " a pris l'outil." });
+        }
+      } else if (evenement === "outil-poser" && moi) {
+        if (etat.outil.proprio === d.id) {
+          etat.outil.proprio = null;
+          etat.chronologie.push({ t: Date.now(), texte: moi.nom + " a posé l'outil." });
+        }
+      } else if (evenement === "outil-donner" && moi) {
+        if (etat.outil.proprio === d.id && participants[d.a]) {
+          etat.outil.proprio = d.a;
+          etat.chronologie.push({ t: Date.now(), texte: moi.nom + " a donné l'outil à " + participants[d.a].nom + "." });
+        }
+      } else if (evenement === "moteur-marche" && moi) {
+        etat.moteur.marche = !etat.moteur.marche;
+      } else if (evenement === "moteur-eclate" && moi) {
+        etat.moteur.eclate = !etat.moteur.eclate;
+      } else if (evenement === "mission-demarrer" && moi) {
+        if (etat.mission.etat !== "en-cours") {
+          const pannes = PIECES.filter(p => p.panne);
+          const panne = pannes[Math.floor(Math.random() * pannes.length)];
+          etat.mission.etat = "en-cours";
+          etat.mission.panne = panne.id;
+          etat.mission.debut = Date.now();
+          etat.mission.duree = null;
+          etat.mission.reparePar = null;
+          etat.mission.numero = (etat.mission.numero || 0) + 1;
+          etat.mission.erreurs = 0;
+          etat.chronologie.push({ t: Date.now(), texte: "Mission " + etat.mission.numero + " démarrée." });
+        }
+      } else if (evenement === "mission-reparer" && moi) {
+        if (etat.mission.etat === "en-cours" &&
+            etat.outil.proprio === d.id) {
+          if (d.piece === etat.mission.panne) {
+            etat.mission.etat = "reussie";
+            etat.mission.duree = Date.now() - etat.mission.debut;
+            etat.mission.reparePar = moi.nom;
+            etat.chronologie.push({ t: Date.now(), texte: moi.nom + " a réparé la panne." });
+            etat.outil.proprio = null;
+          } else {
+            etat.mission.erreurs = (etat.mission.erreurs || 0) + 1;
+            etat.chronologie.push({ t: Date.now(), texte: "Mauvaise pièce sélectionnée." });
+          }
+        }
+      } else if (evenement === "mission-reinitialiser" && moi) {
+        etat.mission.etat = "attente";
+        etat.mission.panne = null;
+        etat.mission.debut = 0;
+        etat.mission.duree = null;
+        etat.mission.reparePar = null;
+        etat.mission.erreurs = 0;
+      }
+
+      etat.version = (etat.version || 0) + 1;
+      if (etat.chronologie.length > 120) {
+        etat.chronologie = etat.chronologie.slice(-120);
+      }
+      return etat;
+    });
+  }
+
+  detach() {
+    if (this.ecouteur) this.etatRef.off("value", this.ecouteur);
+    this.presenceRef.remove().catch(() => {});
+    this.connecte = false;
+    APP.delierVue(this);
+  }
 }
+
 
 document.addEventListener("DOMContentLoaded", () => {
   const scene = document.getElementById("scene");
